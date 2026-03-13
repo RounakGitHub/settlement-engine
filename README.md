@@ -1,6 +1,6 @@
 # Settlement Engine
 
-A **distributed split-payment and settlement engine** built on **.NET 8, Kafka, MongoDB, Redis, and SignalR** — implements debt graph minimisation with eventual consistency, outbox-pattern atomic event publishing, and idempotent command processing under concurrent load, with real-time balance updates.
+A **distributed split-payment and settlement engine** built on **.NET 10 LTS, Kafka, MongoDB, Redis, and SignalR** — implements debt graph minimisation with eventual consistency, outbox-pattern atomic event publishing, and idempotent command processing under concurrent load, with real-time balance updates.
 
 ## The Problem
 
@@ -57,7 +57,7 @@ The Settlement Engine makes the **ledger the source of truth** — an append-onl
 
 | Component | Technology |
 |-----------|-----------|
-| Language / Runtime | C# / .NET 8 |
+| Language / Runtime | C# / .NET 10 LTS |
 | API Framework | ASP.NET Core Web API |
 | CQRS Pipeline | MediatR |
 | Messaging | Apache Kafka |
@@ -110,7 +110,7 @@ settlement-engine/
 
 ### Prerequisites
 
-- [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)
+- [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0)
 - [Docker](https://docs.docker.com/get-docker/)
 - [Docker Compose](https://docs.docker.com/compose/install/)
 
