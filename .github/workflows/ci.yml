@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Restore
+        run: dotnet restore backend/Splitr.sln
+
+      - name: Build
+        run: dotnet build backend/Splitr.sln --no-restore -c Release
+
+      - name: Test
+        run: dotnet test backend/Splitr.sln --no-build -c Release --verbosity normal
