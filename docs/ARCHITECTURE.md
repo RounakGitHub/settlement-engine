@@ -2,7 +2,7 @@
 
 ## Design Philosophy
 
-Every financial action is treated as an **immutable event**, never a mutation. You never update a balance — you append an event that changes it. This is **event sourcing**, and it's what makes the system auditable, replayable, and correct.
+Every financial action is treated as an **immutable event**, never a mutation. You never update a balance — you append an event that changes it. This gives the system auditability, replayability, and correctness. All monetary amounts are stored as **integer paise** (1/100th of a rupee) to eliminate floating-point rounding errors.
 
 ## High-Level Architecture
 
@@ -11,54 +11,58 @@ Every financial action is treated as an **immutable event**, never a mutation. Y
                               │                    WRITE PATH                        │
                               │                                                     │
   ┌──────────┐   HTTP POST    │  ┌────────────┐    ┌───────────┐    ┌────────────┐ │
-  │  Client   │──────────────▶│  │  Command   │───▶│ Idempotency│───▶│  MongoDB   │ │
-  │           │               │  │  Handler   │    │  Check     │    │ Event Store│ │
-  │           │               │  │ (MediatR)  │    │  (Redis)   │    │ + Outbox   │ │
+  │  Client   │──────────────>│  │  Command   │───>│ Idempotency│───>│ PostgreSQL │ │
+  │           │               │  │  Handler   │    │  Check     │    │ (Tables +  │ │
+  │           │               │  │ (Mediator) │    │  (Valkey)  │    │  Outbox)   │ │
   └──────────┘               │  └────────────┘    └───────────┘    └─────┬──────┘ │
        │                      │                                          │         │
        │                      └──────────────────────────────────────────┼─────────┘
        │                                                                 │
        │                      ┌──────────────────────────────────────────┼─────────┐
-       │                      │              EVENT BUS (Kafka)           │         │
-       │                      │                                          ▼         │
+       │                      │            EVENT BUS (Kafka KRaft)       │         │
+       │                      │                                          v         │
        │                      │  ┌──────────────┐              ┌──────────────┐   │
-       │                      │  │ expense-added │              │ Outbox Worker│   │
-       │                      │  │ settlement-* │◀─────────────│ (Relay)      │   │
-       │                      │  │ debt-graph-* │              └──────────────┘   │
-       │                      │  └──────┬───────┘                                 │
+       │                      │  │expense-events │              │   Outbox      │   │
+       │                      │  │settlement-*   │<─────────────│  Publisher    │   │
+       │                      │  │group-events   │              │ (Channel +   │   │
+       │                      │  │debt-graph-*   │              │  Sweep)      │   │
+       │                      │  └──────┬───────┘              └──────────────┘   │
        │                      │         │                                          │
        │                      └─────────┼──────────────────────────────────────────┘
        │                                │
        │        ┌───────────────────────┼───────────────────────┐
        │        │                       │                       │
-       │        ▼                       ▼                       ▼
+       │        v                       v                       v
        │  ┌──────────────┐    ┌──────────────┐    ┌──────────────────┐
-       │  │    Debt       │    │  Projection  │    │   Settlement     │
-       │  │  Simplifier   │    │   Worker     │    │   Processor      │
-       │  │              │    │              │    │                  │
-       │  │ Min-edge     │    │ Denormalised │    │ Lock → Confirm  │
-       │  │ reduction    │    │ read model   │    │ → Publish       │
-       │  └──────┬───────┘    └──────┬───────┘    └──────────────────┘
-       │         │                   │
-       │         ▼                   ▼
-       │  ┌──────────────┐    ┌──────────────┐
-       │  │ debt-graph-  │    │   MongoDB    │
-       │  │ updated      │    │  Read Model  │
-       │  │ (Kafka)      │    │ (Balances)   │
-       │  └──────────────┘    └──────┬───────┘
-       │                             │
-       │  ┌──────────────────────────┘
-       │  │        READ PATH
-       │  ▼
-       │  ┌──────────────┐   GET /balances    ┌──────────┐
-       │  │   Query API  │◀──────────────────│  Client   │
-       │  │ (MediatR)    │                    │          │
-       │  └──────────────┘                    └──────────┘
-       │
-       │  SignalR (WebSocket)
+       │  │    Debt       │    │   SignalR     │    │     Email        │
+       │  │  Simplifier   │    │  Dispatcher   │    │   Notification   │
+       │  │              │    │              │    │    Consumer       │
+       │  │ Min-edge     │    │ Push events  │    │                  │
+       │  │ reduction    │    │ to clients   │    │  SMTP delivery   │
+       │  └──────┬───────┘    └──────────────┘    └──────────────────┘
+       │         │
+       │         v
        │  ┌──────────────┐
-       └─▶│  Real-time   │  Push: balance updates, settlement notifications
-          │  Hub          │
+       │  │ debt-graph-  │
+       │  │ events       │
+       │  │ (Kafka)      │
+       │  └──────────────┘
+       │
+       │  ┌──────────────────────────────────────────────────────┐
+       │  │                   READ PATH                          │
+       │  │                                                      │
+       │  │  ┌─────────────┐   GET /balances    ┌──────────┐   │
+       │  │  │  Query API  │<──────────────────│  Client   │   │
+       │  │  │  (Mediator) │  Computes balances │          │   │
+       │  │  │             │  on-the-fly from   └──────────┘   │
+       │  │  │             │  PostgreSQL tables                 │
+       │  │  └─────────────┘                                    │
+       │  └──────────────────────────────────────────────────────┘
+       │
+       │  SignalR (WebSocket) — Valkey backplane
+       │  ┌──────────────┐
+       └─>│  Real-time   │  Push: balance updates, settlement notifications,
+          │  GroupHub     │  expense changes, member events
           └──────────────┘
 ```
 
@@ -67,163 +71,227 @@ Every financial action is treated as an **immutable event**, never a mutation. Y
 ### 1. Adding an Expense
 
 ```
-Client POST /api/expenses
+Client POST /api/groups/{groupId}/expenses
        │
-       ▼
+       v
 ┌─────────────────────────────────────────────────┐
-│ ExpenseCommand Handler (MediatR)                 │
+│ AddExpenseCommandHandler (Custom Mediator)        │
 │                                                  │
-│  1. Check idempotency key in Redis               │
-│     ├── HIT  → return cached result (no-op)     │
-│     └── MISS → continue                         │
+│  1. ValidationBehaviour runs FluentValidation    │
+│  2. AuthorisationBehaviour checks group membership│
+│  3. Begin EF Core transaction                    │
+│     ├── Write Expense + ExpenseSplits to tables  │
+│     ├── Write StoredEvent (ExpenseAdded)         │
+│     └── Write OutboxEvent (for Kafka relay)      │
+│  4. Commit transaction (atomic via PostgreSQL)   │
 │                                                  │
-│  2. Begin MongoDB transaction                    │
-│     ├── Write ExpenseAdded event to event store  │
-│     └── Write event to outbox collection         │
-│  3. Commit transaction (atomic)                  │
-│                                                  │
-│  4. Set idempotency key in Redis (TTL: 24h)     │
-│  5. Return 201 Created                           │
+│  5. OutboxInterceptor signals OutboxChannel      │
+│  6. Return 201 Created                           │
 └─────────────────────────────────────────────────┘
        │
-       ▼ (async, via outbox worker)
+       v (near-instant, via OutboxChannel signal)
 ┌─────────────────────────────────────────────────┐
-│ Outbox Worker                                    │
-│  1. Poll outbox collection for unpublished events│
-│  2. Publish to Kafka topic: expense-added        │
-│  3. Mark outbox entry as published               │
-│  4. If crash before step 3 → re-publishes (safe │
-│     because consumers are idempotent)            │
+│ OutboxPublisherService (Hosted Service)           │
+│  1. Awaits OutboxChannel signal (or startup sweep)│
+│  2. Load unpublished OutboxEvents from PostgreSQL │
+│  3. Publish to Kafka topic: expense-events       │
+│  4. Mark OutboxEvent as published (set timestamp)│
+│  5. If crash before step 4 → startup sweep       │
+│     re-publishes (safe: consumers are idempotent)│
 └─────────────────────────────────────────────────┘
 ```
 
 ### 2. Debt Simplification
 
 ```
-Kafka: expense-added
+Kafka: expense-events (ExpenseAdded / ExpenseEdited / ExpenseDeleted)
        │
-       ▼
+       v
 ┌─────────────────────────────────────────────────┐
-│ Debt Simplifier Consumer                         │
+│ DebtSimplifierConsumer (Hosted Service)           │
 │                                                  │
-│  1. Load current debt graph for group            │
-│  2. Add new expense edges                        │
-│  3. Run minimum-edge reduction algorithm:        │
-│     ├── Calculate net balance per member          │
+│  1. Compute net balances for the group           │
+│     (BalanceCalculator: credits - debits -       │
+│      confirmed settlements)                      │
+│  2. Run greedy min-edge reduction algorithm:     │
 │     ├── Separate into creditors (+) / debtors (-)│
-│     ├── Greedily match largest debtor ↔ creditor │
+│     ├── Sort by absolute value descending        │
+│     ├── Greedily match largest debtor <> creditor│
 │     └── Produces minimum transfer set            │
-│  4. Publish DebtGraphUpdated event to Kafka      │
+│  3. Publish DebtGraphUpdated event to Kafka      │
+│     (via outbox for atomicity)                   │
 └─────────────────────────────────────────────────┘
 ```
 
-**Algorithm detail**: The debt simplification is a flow problem on a directed weighted graph. For each group member, compute their net balance (sum of credits minus sum of debits). Then greedily match the largest debtor with the largest creditor, creating a single transfer that partially or fully settles both. Repeat until all balances are zero. This reduces N*(N-1)/2 potential edges to at most N-1 transfers, and often far fewer.
-
-### 3. Settlement Flow
+### 3. Settlement Flow (Razorpay-Integrated)
 
 ```
-User A: POST /api/settlements/propose
+User A: POST /api/settlements/initiate
        │
-       ▼
+       v
 ┌─────────────────────────────────────────────────┐
-│ Phase 1: Propose                                 │
-│  1. Write SettlementProposed event               │
-│  2. Push notification to User B via SignalR      │
+│ Phase 1: Initiate                                │
+│  1. Validate payer/payee are group members       │
+│  2. Lazy-expire any stale pending settlements    │
+│  3. Create Razorpay order (amount in paise)      │
+│  4. Write Settlement record (status: Pending)    │
+│  5. Write SettlementProposed outbox event        │
+│  6. Return Razorpay order details to client      │
+│  7. Client completes payment via Razorpay UI     │
 └─────────────────────────────────────────────────┘
        │
-User B: POST /api/settlements/{id}/confirm
+Razorpay: POST /api/webhooks/razorpay
        │
-       ▼
+       v
 ┌─────────────────────────────────────────────────┐
-│ Phase 2: Confirm                                 │
-│  1. Acquire Redis distributed lock:              │
-│     settlement:{groupId}:{settlementId}          │
-│     ├── FAIL → return 409 Conflict              │
+│ Phase 2: Webhook Confirmation                    │
+│  1. Verify HMAC-SHA256 signature                 │
+│  2. Acquire Valkey distributed lock:             │
+│     settlement:{settlementId}                    │
+│     ├── FAIL → skip (concurrent processing)     │
 │     └── OK   → continue                         │
 │                                                  │
-│  2. Validate settlement is still in PROPOSED     │
-│  3. Write SettlementConfirmed event              │
-│  4. Publish to Kafka                             │
-│  5. Release lock                                 │
-│  6. Push live update to both users via SignalR   │
+│  3. Load settlement, validate status = Pending   │
+│  4. payment.captured:                            │
+│     ├── Amount matches → status = Confirmed      │
+│     └── Amount mismatch → status = Review        │
+│  5. payment.failed → status = Failed             │
+│  6. Write SettlementConfirmed/Failed outbox event│
+│  7. Release lock                                 │
+│  8. SignalR push to both users via Kafka consumer│
 └─────────────────────────────────────────────────┘
 ```
 
-## Data Models
+## Data Models (PostgreSQL)
 
-### Event Store (MongoDB: `events` collection)
+### Users
 
-```json
-{
-  "_id": "ObjectId",
-  "eventId": "UUID",
-  "eventType": "ExpenseAdded | SettlementProposed | SettlementConfirmed | DebtGraphUpdated",
-  "groupId": "UUID",
-  "payload": { /* event-specific data */ },
-  "metadata": {
-    "actorId": "UUID",
-    "timestamp": "ISODate",
-    "version": 1,
-    "idempotencyKey": "string"
-  }
-}
-```
+| Column | Type | Description |
+|--------|------|-------------|
+| id | UUID (PK) | User identifier |
+| email | text | Unique email |
+| name | text | Display name |
+| password_hash | text | BCrypt hash |
+| failed_login_attempts | int | Account lockout counter |
+| locked_until | timestamp | Lockout expiry |
+| created_at | timestamp | Registration time |
 
-### Outbox (MongoDB: `outbox` collection)
+### Groups
 
-```json
-{
-  "_id": "ObjectId",
-  "eventId": "UUID",
-  "topic": "expense-added",
-  "payload": { /* serialised event */ },
-  "createdAt": "ISODate",
-  "publishedAt": "ISODate | null",
-  "retryCount": 0
-}
-```
+| Column | Type | Description |
+|--------|------|-------------|
+| id | UUID (PK) | Group identifier |
+| name | text | Group name |
+| currency | text | Default "INR" |
+| category | text | Group category |
+| created_by | UUID (FK) | Creator user |
+| invite_code | text | 8-char alphanumeric join code |
+| is_archived | bool | Archive flag |
+| deleted_after | timestamp | Auto-cleanup date |
 
-### Read Model (MongoDB: `balances` collection)
+### Expenses
 
-```json
-{
-  "_id": "ObjectId",
-  "groupId": "UUID",
-  "memberId": "UUID",
-  "netBalance": -1500.00,
-  "owes": [
-    { "to": "UUID", "amount": 750.00 },
-    { "to": "UUID", "amount": 750.00 }
-  ],
-  "lastUpdatedEventId": "UUID",
-  "updatedAt": "ISODate"
-}
-```
+| Column | Type | Description |
+|--------|------|-------------|
+| id | UUID (PK) | Expense identifier |
+| group_id | UUID (FK) | Parent group |
+| paid_by | UUID (FK) | Payer user |
+| amount_paise | bigint | Amount in paise (integer arithmetic) |
+| description | text | Expense description |
+| split_type | enum | Equal / Exact / Percentage |
+| deleted_at | timestamp | Soft delete marker |
+
+### Expense Splits
+
+| Column | Type | Description |
+|--------|------|-------------|
+| id | UUID (PK) | Split identifier |
+| expense_id | UUID (FK) | Parent expense |
+| user_id | UUID (FK) | Debtor user |
+| amount_paise | bigint | Individual share in paise |
+
+### Settlements
+
+| Column | Type | Description |
+|--------|------|-------------|
+| id | UUID (PK) | Settlement identifier |
+| group_id | UUID (FK) | Parent group |
+| payer_id | UUID (FK) | Who pays |
+| payee_id | UUID (FK) | Who receives |
+| amount_paise | bigint | Amount in paise |
+| status | enum | Pending / Confirmed / Failed / Expired / Cancelled / Review |
+| razorpay_order_id | text | Razorpay order reference |
+| razorpay_payment_id | text | Razorpay payment reference |
+| confirmed_at | timestamp | Confirmation time |
+| expires_at | timestamp | Auto-expiry deadline |
+
+### Outbox Events (Transactional Outbox)
+
+| Column | Type | Description |
+|--------|------|-------------|
+| id | UUID (PK) | Event identifier |
+| event_type | text | Event type name |
+| payload | jsonb | Serialised event data |
+| published_at | timestamp | When published to Kafka (null = pending) |
+| created_at | timestamp | When written |
+
+### Stored Events (Event Log)
+
+| Column | Type | Description |
+|--------|------|-------------|
+| id | UUID (PK) | Event identifier |
+| aggregate_id | UUID | Entity the event belongs to |
+| aggregate_type | text | Entity type name |
+| event_type | text | Event type name |
+| payload | jsonb | Event data |
+| version | int | Aggregate version |
+| created_at | timestamp | Event time |
+
+## Authentication & Security
+
+- **JWT access tokens** (RSA-2048 signed, 15-minute expiry)
+- **Refresh tokens** in HTTP-only, Secure, SameSite=Strict cookies
+- **Refresh token rotation** with token family tracking (detects reuse)
+- **BCrypt** password hashing (cost factor 12) with legacy PBKDF2 migration support
+- **Account lockout** after 10 failed attempts (30-minute window)
+- **Rate limiting** (sliding window) per endpoint category
+- **Razorpay webhook verification** via HMAC-SHA256 + IP whitelist
 
 ## Consistency Model
 
 | Aspect | Guarantee |
 |--------|-----------|
-| Event writes | **Strong** — MongoDB transactions ensure event + outbox atomicity |
-| Kafka publish | **At-least-once** — outbox worker retries; consumers must be idempotent |
+| Event writes | **Strong** — PostgreSQL transactions ensure entity + outbox atomicity |
+| Kafka publish | **At-least-once** — outbox publisher retries; consumers must be idempotent |
 | Debt graph | **Eventually consistent** — may be one event behind, presented as "recommended as of now" |
-| Settlement locking | **Linearizable** within a settlement — Redis distributed lock prevents double-confirm |
-| Read model | **Eventually consistent** — projection worker updates asynchronously |
+| Settlement locking | **Linearizable** within a settlement — Valkey distributed lock prevents double-confirm |
+| Balance queries | **Strong** — computed on-the-fly from PostgreSQL tables |
+
+## Background Services
+
+| Service | Type | Schedule |
+|---------|------|----------|
+| OutboxPublisherService | Hosted Service | Channel-driven (near-instant) + startup sweep |
+| DebtSimplifierConsumer | Kafka Consumer | Event-driven (expense events) |
+| SignalRDispatcherConsumer | Kafka Consumer | Event-driven (all topics) |
+| EmailNotificationConsumer | Kafka Consumer | Event-driven (user-relevant events) |
+| SettlementExpiryJob | Hosted Service | Every 1 hour |
+| GroupArchiveCleanupJob | Hosted Service | Every 24 hours |
 
 ## Scalability Design
 
 ### Kafka Decouples Throughput from Processing
 
-The command API accepts expense submissions at any rate — they land in Kafka immediately. The debt simplifier, outbox processor, and projection worker each consume at their own pace. Scale each consumer independently.
+The command API accepts expense submissions at any rate — events land in the outbox immediately. The outbox publisher, debt simplifier, SignalR dispatcher, and email consumer each process at their own pace. Scale each consumer independently.
 
-### Read/Write Split
+### On-the-fly Balance Computation
 
-Reads vastly outnumber writes. The query API reads from a denormalised read model that never touches the event store. Add read replicas, cache aggressively, or move the read model to a faster store — without touching the write path.
+Balances are computed directly from PostgreSQL tables (expenses, splits, settlements) via the BalanceCalculator. No denormalised read model to keep in sync — queries are always consistent with the latest committed state.
 
 ### Scoped Distributed Locks
 
-Settlement locks are keyed as `settlement:{groupId}:{settlementId}`. Two groups settling simultaneously never contend. Horizontal scalability by design.
+Settlement locks are keyed as `settlement:{settlementId}`. Two groups settling simultaneously never contend. Horizontal scalability by design.
 
 ### Event Log as Scalability Backstop
 
-Immutable events in MongoDB (with TTL indexes) allow replaying history, rebuilding projections, adding new consumers, or migrating read models without touching production data.
+Immutable stored events in PostgreSQL allow replaying history, rebuilding state, adding new consumers, or auditing without touching production data.
