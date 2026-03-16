@@ -6,11 +6,12 @@ obj/
 *.userosscache
 *.sln.docstates
 *.userprefs
+.vs/
+*.DotSettings.user
 
 ## NuGet
 **/[Pp]ackages/*
 *.nupkg
-**/packages/*
 
 ## Build results
 [Dd]ebug/
@@ -19,11 +20,10 @@ x64/
 x86/
 [Bb]uild/
 bld/
+publish/
 
 ## Visual Studio
-.vs/
 *.suo
-*.user
 *.cache
 *.docuser
 
@@ -31,13 +31,43 @@ bld/
 .idea/
 *.sln.iml
 
+## Node.js
+node_modules/
+.next/
+dist/
+.turbo/
+.vercel/
+
+## IDE
+.vscode/
+!.vscode/settings.json
+
 ## OS
 .DS_Store
 Thumbs.db
+Desktop.ini
+*.swp
+*.swo
 
-## Environment
+## Docker
+docker-compose.override.yml
+
+## Environment & secrets
 .env
 *.local
-appsettings.*.json
-!appsettings.json
-!appsettings.Development.json
+!.gitignore
+appsettings.Development.json
+
+## Coverage reports
+coverage/
+*.lcov
+TestResults/
+*.trx
+
+## Misc build artifacts
+*.log
+*.bak
+*.tmp
+
+## Keep placeholder files
+!.gitkeep
